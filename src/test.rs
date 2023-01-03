@@ -1,11 +1,7 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-use crate::{
-    get_local_timestamp_rfc3339,
-    offset_from_process,
-    set_global_offset,
-};
+use crate::{get_local_timestamp_rfc3339, offset_from_process, set_global_offset};
 
 static TIME_FORMAT_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}[+|-]\\d{2}:\\d{2}").unwrap()
@@ -19,7 +15,7 @@ macro_rules! test_is_ok {
         let res = res.unwrap();
         assert!(!res.is_empty(), "res: {:#?}", res);
         assert!(TIME_FORMAT_REGEX.is_match(&res), "res: {:#?}", res);
-        assert!(res.contains($exp_ts_offset),  "res: {:#?}", res); 
+        assert!(res.contains($exp_ts_offset), "res: {:#?}", res);
     };
 }
 

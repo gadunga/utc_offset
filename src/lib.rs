@@ -3,26 +3,14 @@
 #[cfg(test)]
 mod test;
 
-use std::{
-    process::Command,
-    str,
-    sync::RwLock,
-};
+use std::{process::Command, str, sync::RwLock};
 
 use once_cell::sync::Lazy;
 use thiserror::Error;
 use time::{
-    error::{
-        ComponentRange,
-        Format,
-    },
-    format_description::{
-        parse,
-        FormatItem,
-    },
-    Duration,
-    OffsetDateTime,
-    UtcOffset,
+    error::{ComponentRange, Format},
+    format_description::{parse, FormatItem},
+    Duration, OffsetDateTime, UtcOffset,
 };
 
 /// Possible errors
@@ -192,11 +180,11 @@ fn process_cmd_output(stdout: &[u8], formatter: &[FormatItem<'static>]) -> Optio
             Ok(o) => return Some(o),
             Err(e) => {
                 log::warn!("Unable to parse output: {}", e);
-            },
+            }
         },
         Err(e) => {
             log::warn!("Unable to convert output: {}", e);
-        },
+        }
     }
     None
 }

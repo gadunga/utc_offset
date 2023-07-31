@@ -88,6 +88,7 @@ const PARSE_FORMAT: &[FormatItem<'static>] =
 
 /// Returns the global offset value if it is initialized, otherwise it
 /// returns an error. Unlike the `try_set_` functions, this waits for a read lock.
+#[inline]
 pub fn get_global_offset() -> Result<UtcOffset> {
     if let Some(o) = OFFSET.get() {
         Ok(*o.read())
@@ -97,6 +98,7 @@ pub fn get_global_offset() -> Result<UtcOffset> {
 }
 /// Attempts to set the global offset, returning an error if the
 /// write lock cannot be obtained.
+#[inline]
 pub fn try_set_global_offset(o: UtcOffset) -> Result<()> {
     let o_ref = OFFSET.get_or_init(|| RwLock::new(o));
     if let Some(mut o_lock) = o_ref.try_write() {
@@ -116,6 +118,7 @@ pub fn try_set_global_offset(o: UtcOffset) -> Result<()> {
 ///
 /// # Error
 /// If we fail to parse the input offset string we'll return an `Error::InvalidOffsetString`.
+#[inline]
 pub fn try_set_global_offset_from_str(input: &str) -> Result<()> {
     let trimmed = trim_new_lines(input);
     let o = UtcOffset::parse(trimmed, &PARSE_FORMAT).map_err(|_| Error::InvalidOffsetString)?;
@@ -134,6 +137,7 @@ pub fn try_set_global_offset_from_str(input: &str) -> Result<()> {
 /// # Errors
 /// If the offsets are out of range or there is an issue setting the offset an error will be returned.
 #[allow(clippy::manual_range_contains)]
+#[inline]
 pub fn try_set_global_offset_from_pair(offset_hours: i8, offset_minutes: i8) -> Result<()> {
     let o = from_offset_pair(offset_hours, offset_minutes)?;
     try_set_global_offset(o)
@@ -152,6 +156,7 @@ pub fn try_set_global_offset_from_pair(offset_hours: i8, offset_minutes: i8) -> 
 ///     2.) `time::UtcOffset::current_local_offset()` works
 ///     3.) The library is able to query the timezone using system commands.
 /// If none succeed, we default to UTC.
+#[inline]
 pub fn get_local_timestamp_rfc3339() -> Result<(String, Errors)> {
     let (offset, errs) = get_utc_offset();
     let res = get_local_timestamp_from_offset_rfc3339(offset)?;
@@ -169,6 +174,7 @@ pub fn get_local_timestamp_rfc3339() -> Result<(String, Errors)> {
 /// [year]-[month]-[day]T[hour]:[minute]:[second][offset_hour sign:mandatory]:[offset_second]
 /// ```
 #[allow(clippy::cast_lossless)]
+#[inline]
 pub fn get_local_timestamp_from_offset_rfc3339(utc_offset: UtcOffset) -> Result<String> {
     let dt_now = OffsetDateTime::now_utc();
     let offset_dt_now = if utc_offset == UtcOffset::UTC {
@@ -189,6 +195,7 @@ pub fn get_local_timestamp_from_offset_rfc3339(utc_offset: UtcOffset) -> Result<
 
 /// Do whatever it takes to get a utc offset and cache it.
 /// Worst case scenario we just assume UTC time.
+#[inline]
 pub fn get_utc_offset() -> (UtcOffset, Errors) {
     let mut errs = Errors::new();
     if let Ok(o) = get_global_offset() {

@@ -180,7 +180,6 @@ pub fn get_local_timestamp_from_offset_rfc3339(utc_offset: UtcOffset) -> Result<
     let offset_dt_now = if utc_offset == UtcOffset::UTC {
         dt_now
     } else {
-        // verify: I changed this to minutes resolution, any reason it used to be `whole_minutes`?
         if let Some(t) = dt_now.checked_add(Duration::minutes(utc_offset.whole_minutes() as i64)) {
             t.replace_offset(utc_offset)
         } else {

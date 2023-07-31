@@ -9,7 +9,8 @@ static TIME_FORMAT_REGEX: Lazy<Regex> = Lazy::new(|| {
 
 macro_rules! test_is_ok {
     ($offset_hr:expr, $offset_min:expr, $exp_ts_offset:expr) => {
-        assert!(try_set_global_offset_from_pair($offset_hr, $offset_min).is_ok());
+        let pair_res = try_set_global_offset_from_pair($offset_hr, $offset_min);
+        assert!(pair_res.is_ok(), "pair_res: {pair_res:?}");
         let res = get_local_timestamp_rfc3339();
         assert!(res.is_ok(), "res: {:#?}", res);
         let res = res.unwrap().0;

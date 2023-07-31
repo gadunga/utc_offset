@@ -90,7 +90,7 @@ const PARSE_FORMAT: &[FormatItem<'static>] =
 /// returns an error. Unlike the `try_set_` functions, this waits for a read lock.
 pub fn get_global_offset() -> Result<UtcOffset> {
     if let Some(o) = OFFSET.get() {
-        Ok(o.read().clone())
+        Ok(*o.read())
     } else {
         Err(Error::Uninitialized)
     }
@@ -230,7 +230,7 @@ fn offset_from_process() -> Result<UtcOffset> {
     };
 
     match cmd() {
-        Ok(output) => parse_cmd_output(&output.stdout, &PARSE_FORMAT),
+        Ok(output) => parse_cmd_output(&output.stdout, PARSE_FORMAT),
         Err(e) => Err(Error::TimeCommand(e)),
     }
 }
@@ -240,7 +240,7 @@ fn trim_new_lines(s: &str) -> &str {
 }
 
 fn from_offset_pair(offset_hours: i8, offset_minutes: i8) -> Result<UtcOffset> {
-    if offset_hours < -12 || offset_hours > 14 {
+    if !(-12..=14).contains(&offset_hours) {
         return Err(Error::InvalidOffsetHours(offset_hours));
     } else if !(0..=59).contains(&offset_minutes) {
         return Err(Error::InvalidOffsetMinutes(offset_minutes));

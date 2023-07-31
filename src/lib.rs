@@ -179,13 +179,12 @@ pub fn get_local_timestamp_from_offset_rfc3339(utc_offset: UtcOffset) -> Result<
     let dt_now = OffsetDateTime::now_utc();
     let offset_dt_now = if utc_offset == UtcOffset::UTC {
         dt_now
+    } else if let Some(t) = dt_now.checked_add(Duration::minutes(utc_offset.whole_minutes() as i64))
+    {
+        t.replace_offset(utc_offset)
     } else {
-        if let Some(t) = dt_now.checked_add(Duration::minutes(utc_offset.whole_minutes() as i64)) {
-            t.replace_offset(utc_offset)
-        } else {
-            // datetime overflow (not just hours, total representable time)
-            return Err(Error::DatetimeOverflow);
-        }
+        // datetime overflow (not just hours, total representable time)
+        return Err(Error::DatetimeOverflow);
     };
 
     let formatted = offset_dt_now.format(&TIME_FORMAT)?;

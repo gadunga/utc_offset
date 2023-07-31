@@ -3,17 +3,34 @@
 #[cfg(test)]
 mod test;
 
-use std::{process::Command, str, sync::RwLock};
+use std::{process::Command, str};
 
-use once_cell::sync::Lazy;
+use once_cell::sync::OnceCell;
+use parking_lot::RwLock;
 use thiserror::Error;
 use time::{
     error::{ComponentRange, Format},
-    format_description::{parse, FormatItem},
+    format_description::FormatItem,
+    macros::format_description,
     Duration, OffsetDateTime, UtcOffset,
 };
 
-/// Possible errors
+/// Wrapper with error defaulted to our [enum@Error].
+pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+/// Soft errors that may occur in the process of initializing the global utc offset.
+#[derive(Debug)]
+pub struct Errors(Vec<Error>);
+impl Errors {
+    fn new() -> Self {
+        Self(vec![])
+    }
+    fn push(&mut self, e: Error) {
+        self.0.push(e)
+    }
+}
+
+/// An enumeration of all possible error that may occur here.
 #[derive(Error, Debug)]
 pub enum Error {
     /// Failure acquiring the write lock as it was likely poisoned.
@@ -23,6 +40,10 @@ pub enum Error {
     /// Failure acquiring the read lock as it was likely poisoned.
     #[error("Unable to acquire a read lock")]
     ReadLock,
+
+    /// An error occurred Parsing a time string.
+    #[error("Unable to parse time: {0}")]
+    Parse(#[from] time::error::Parse),
 
     /// The values used to create a UTC Offset were invalid.
     #[error("Unable to construct offset from offset hours/minutes: {0}")]
@@ -42,21 +63,49 @@ pub enum Error {
     InvalidOffsetMinutes(i8),
 
     /// An invalid value for the offset minutes was passed in.
-    #[error("Unable to parse offset string.")]
+    #[error("Unable to parse offset string")]
     InvalidOffsetString,
+
+    /// An error occurred executing the system-specific command to get the current time.
+    #[error("Error executing command to get system time: {0}")]
+    TimeCommand(std::io::Error),
+
+    /// There was an overflow computing the Datetime
+    #[error("Datetime overflow")]
+    DatetimeOverflow,
+
+    /// The global offset is not initialized.
+    #[error("The global offset is not initialized.")]
+    Uninitialized,
 }
 
-static OFFSET: Lazy<RwLock<Option<UtcOffset>>> = Lazy::new(|| RwLock::new(None));
-static TIME_FORMAT: Lazy<Vec<FormatItem<'static>>> = Lazy::new(|| {
-    parse(
-        "[year]-[month]-[day]T[hour]:[minute]:[second][offset_hour sign:mandatory]:[offset_second]",
-    )
-    .unwrap_or_default()
-});
-static PARSE_FORMAT: Lazy<Vec<FormatItem<'static>>> =
-    Lazy::new(|| parse("[offset_hour][offset_minute]").unwrap_or_default());
-static PARSE_FORMAT_WITH_COLON: Lazy<Vec<FormatItem<'static>>> =
-    Lazy::new(|| parse("[offset_hour]:[offset_minute]").unwrap_or_default());
+static OFFSET: OnceCell<RwLock<UtcOffset>> = OnceCell::new();
+const TIME_FORMAT: &[FormatItem<'static>] = format_description!(
+    "[year]-[month]-[day]T[hour]:[minute]:[second][offset_hour sign:mandatory]:[offset_second]"
+);
+const PARSE_FORMAT: &[FormatItem<'static>] =
+    format_description!("[offset_hour][optional [:]][offset_minute]");
+
+/// Returns the global offset value if it is initialized, otherwise it
+/// returns an error. Unlike the `try_set_` functions, this waits for a read lock.
+pub fn get_global_offset() -> Result<UtcOffset> {
+    if let Some(o) = OFFSET.get() {
+        Ok(o.read().clone())
+    } else {
+        Err(Error::Uninitialized)
+    }
+}
+/// Attempts to set the global offset, returning an error if the
+/// write lock cannot be obtained.
+pub fn try_set_global_offset(o: UtcOffset) -> Result<()> {
+    let o_ref = OFFSET.get_or_init(|| RwLock::new(o));
+    if let Some(mut o_lock) = o_ref.try_write() {
+        *o_lock = o;
+        Ok(())
+    } else {
+        Err(Error::WriteLock)
+    }
+}
 
 /// Sets a static UTC offset, from an input string, to use with future calls to
 /// `get_local_timestamp_rfc3339`. The format should be [+/-]HHMM.
@@ -65,18 +114,12 @@ static PARSE_FORMAT_WITH_COLON: Lazy<Vec<FormatItem<'static>>> =
 /// * input - The UTC offset as a string. Example values are: +0900, -0930,
 ///   1000, +09:00, -09:30, 10:00
 ///
-/// # Returns
-/// Returns a `Result` of either the inputed offset hours/minutes or an Error if
-/// the method fails.
-pub fn set_global_offset_from_str(input: &str) -> Result<(i8, i8), Error> {
+/// # Error
+/// If we fail to parse the input offset string we'll return an `Error::InvalidOffsetString`.
+pub fn try_set_global_offset_from_str(input: &str) -> Result<()> {
     let trimmed = trim_new_lines(input);
-    if let Ok(o) = UtcOffset::parse(trimmed, &PARSE_FORMAT) {
-        init_from_utc_offset(o)
-    } else if let Ok(o) = UtcOffset::parse(trimmed, &PARSE_FORMAT_WITH_COLON) {
-        init_from_utc_offset(o)
-    } else {
-        Err(Error::InvalidOffsetString)
-    }
+    let o = UtcOffset::parse(trimmed, &PARSE_FORMAT).map_err(|_| Error::InvalidOffsetString)?;
+    try_set_global_offset(o)
 }
 
 /// Sets a static UTC offset to use with future calls to
@@ -88,34 +131,31 @@ pub fn set_global_offset_from_str(input: &str) -> Result<(i8, i8), Error> {
 /// * offset_minutes - the minute value of the UTC offset, cannot be less than 0
 ///   or greater than 59
 ///
-/// # Returns
-/// Returns a `Result` of either the inputed offset hours/minutes or an Error if
-/// the method fails.
+/// # Errors
+/// If the offsets are out of range or there is an issue setting the offset an error will be returned.
 #[allow(clippy::manual_range_contains)]
-pub fn set_global_offset(offset_hours: i8, offset_minutes: i8) -> Result<(i8, i8), Error> {
-    if offset_hours < -12 || offset_hours > 14 {
-        Err(Error::InvalidOffsetHours(offset_hours))
-    } else if !(0..=59).contains(&offset_minutes) {
-        Err(Error::InvalidOffsetMinutes(offset_minutes))
-    } else {
-        let o = UtcOffset::from_hms(offset_hours, offset_minutes, 0)?;
-        init_from_utc_offset(o)
-    }
+pub fn try_set_global_offset_from_pair(offset_hours: i8, offset_minutes: i8) -> Result<()> {
+    let o = from_offset_pair(offset_hours, offset_minutes)?;
+    try_set_global_offset(o)
 }
 
 /// Gets a timestamp string using in either the local offset or +00:00
 ///
 /// # Returns
-/// Returns a `Result` of either the timestamp in the following format
-/// "[year]-[month]-[day]T[hour]:[minute]:[second][offset_hour
-/// sign:mandatory]:[offset_second]", or an error if the method fails.
+/// Returns a `Result` of either the timestamp in the following format or the error encountered during its construction.
+/// ```text
+/// [year]-[month]-[day]T[hour]:[minute]:[second][offset_hour sign:mandatory]:[offset_second]
+/// ```
+/// , or an error if the method fails.
 /// The timezone will be in the local offset IF any of the following succeed:
 ///     1.) set_global_offset is called.
 ///     2.) `time::UtcOffset::current_local_offset()` works
 ///     3.) The library is able to query the timezone using system commands.
 /// If none succeed, we default to UTC.
-pub fn get_local_timestamp_rfc3339() -> Result<String, Error> {
-    get_local_timestamp_from_offset_rfc3339(get_local_offset())
+pub fn get_local_timestamp_rfc3339() -> Result<(String, Errors)> {
+    let (offset, errs) = get_utc_offset();
+    let res = get_local_timestamp_from_offset_rfc3339(offset)?;
+    Ok((res, errs))
 }
 
 /// Gets a timestamp string using the specified offset
@@ -124,89 +164,92 @@ pub fn get_local_timestamp_rfc3339() -> Result<String, Error> {
 /// * utc_offset - A caller specified offset
 ///
 /// # Returns
-/// Returns a `Result` of either the timestamp in the following format
-/// "[year]-[month]-[day]T[hour]:[minute]:[second][offset_hour
-/// sign:mandatory]:[offset_second]", or an error if the method fails.
+/// Returns a `Result` timestamp in the following format or the error encountered during its construction.
+/// ```text
+/// [year]-[month]-[day]T[hour]:[minute]:[second][offset_hour sign:mandatory]:[offset_second]
+/// ```
 #[allow(clippy::cast_lossless)]
-pub fn get_local_timestamp_from_offset_rfc3339(utc_offset: UtcOffset) -> Result<String, Error> {
-    let datetime_now = OffsetDateTime::now_utc();
-    if utc_offset != UtcOffset::UTC {
-        if let Some(t) = datetime_now.checked_add(Duration::hours(utc_offset.whole_hours() as i64))
-        {
-            let offset_datetime_now = t.replace_offset(utc_offset);
-            return Ok(offset_datetime_now.format(&TIME_FORMAT)?);
-        }
-    }
-
-    Ok(datetime_now.format(&TIME_FORMAT)?)
-}
-
-fn init_from_utc_offset(offset: UtcOffset) -> Result<(i8, i8), Error> {
-    if let Ok(mut l) = OFFSET.write() {
-        *l = Some(offset);
+pub fn get_local_timestamp_from_offset_rfc3339(utc_offset: UtcOffset) -> Result<String> {
+    let dt_now = OffsetDateTime::now_utc();
+    let offset_dt_now = if utc_offset == UtcOffset::UTC {
+        dt_now
     } else {
-        log::warn!("UTC Offset failed: {}", offset);
-        return Err(Error::WriteLock);
-    }
-    log::info!("UTC Offset set to: {}", offset);
-    Ok((offset.whole_hours(), offset.minutes_past_hour()))
-}
-
-pub fn get_local_offset() -> UtcOffset {
-    if let Ok(reader) = OFFSET.read() {
-        if let Some(o) = *reader {
-            return o;
+        // verify: I changed this to minutes resolution, any reason it used to be `whole_minutes`?
+        if let Some(t) = dt_now.checked_add(Duration::minutes(utc_offset.whole_minutes() as i64)) {
+            t.replace_offset(utc_offset)
+        } else {
+            // datetime overflow (not just hours, total representable time)
+            return Err(Error::DatetimeOverflow);
         }
-    }
-
-    let offset = if let Ok(o) = time::UtcOffset::current_local_offset() {
-        o
-    } else if let Some(o) = offset_from_process() {
-        o
-    } else {
-        UtcOffset::UTC
     };
 
-    if let Err(e) = init_from_utc_offset(offset) {
-        log::warn!("Unable to initialize offset: {}", e);
-    }
-
-    offset
+    let formatted = offset_dt_now.format(&TIME_FORMAT)?;
+    Ok(formatted)
 }
 
-fn process_cmd_output(stdout: &[u8], formatter: &[FormatItem<'static>]) -> Option<UtcOffset> {
-    match str::from_utf8(stdout) {
-        Ok(v) => match UtcOffset::parse(trim_new_lines(v), &formatter) {
-            Ok(o) => return Some(o),
-            Err(e) => {
-                log::warn!("Unable to parse output: {}", e);
-            }
-        },
+/// Do whatever it takes to get a utc offset and cache it.
+/// Worst case scenario we just assume UTC time.
+pub fn get_utc_offset() -> (UtcOffset, Errors) {
+    let mut errs = Errors::new();
+    if let Ok(o) = get_global_offset() {
+        return (o, errs);
+    }
+
+    let o = match construct_offset() {
+        Ok(o) => o,
         Err(e) => {
-            log::warn!("Unable to convert output: {}", e);
+            errs.push(e);
+            UtcOffset::UTC
         }
+    };
+
+    if let Err(e) = try_set_global_offset(o) {
+        errs.push(e)
     }
-    None
+    (o, errs)
 }
 
-fn offset_from_process() -> Option<UtcOffset> {
-    if cfg!(target_os = "windows") {
-        if let Ok(output) = Command::new("powershell")
-            .arg("Get-Date")
-            .arg("-Format")
-            .arg("\"K \"")
-            .output()
-        {
-            // The space in "K " is intentional. Thanks Powershell
-            return process_cmd_output(&output.stdout, &PARSE_FORMAT_WITH_COLON);
-        }
-    } else if let Ok(output) = Command::new("date").arg("+%z").output() {
-        return process_cmd_output(&output.stdout, &PARSE_FORMAT);
-    }
+fn parse_cmd_output(stdout: &[u8], formatter: &[FormatItem<'static>]) -> Result<UtcOffset> {
+    let output = String::from_utf8_lossy(stdout);
+    let trimmed = trim_new_lines(&output);
+    let offset = UtcOffset::parse(trimmed, &formatter)?;
+    Ok(offset)
+}
 
-    None
+fn offset_from_process() -> Result<UtcOffset> {
+    let cmd = if cfg!(target_os = "windows") {
+        || {
+            Command::new("powershell")
+                .arg("Get-Date")
+                .arg("-Format")
+                .arg("\"K \"")
+                .output()
+        }
+    } else {
+        || Command::new("date").arg("+%z").output()
+    };
+
+    match cmd() {
+        Ok(output) => parse_cmd_output(&output.stdout, &PARSE_FORMAT),
+        Err(e) => Err(Error::TimeCommand(e)),
+    }
 }
 
 fn trim_new_lines(s: &str) -> &str {
     s.trim().trim_end_matches("\r\n").trim_matches('\n')
+}
+
+fn from_offset_pair(offset_hours: i8, offset_minutes: i8) -> Result<UtcOffset> {
+    if offset_hours < -12 || offset_hours > 14 {
+        return Err(Error::InvalidOffsetHours(offset_hours));
+    } else if !(0..=59).contains(&offset_minutes) {
+        return Err(Error::InvalidOffsetMinutes(offset_minutes));
+    }
+
+    Ok(UtcOffset::from_hms(offset_hours, offset_minutes, 0)?)
+}
+
+/// Construct an offset.
+fn construct_offset() -> Result<UtcOffset> {
+    UtcOffset::current_local_offset().or_else(|_| offset_from_process())
 }
